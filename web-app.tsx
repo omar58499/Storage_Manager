@@ -339,16 +339,22 @@ export default function App() {
       const sessionUser = localStorage.getItem('sessionUser');
       if (sessionUser && USERS[sessionUser]) {
         const user = USERS[sessionUser];
-        setCurrentUser(user);
-        setIsLoggedIn(true);
-
+        
         // Load any uploaded files saved for this user
         const savedFiles = loadUploadedFiles(sessionUser);
         // Deduplicate by ID to prevent duplicates on refresh
         const dedupedFiles = Array.from(
           new Map(savedFiles.map(f => [f.fileData.id, f])).values()
         );
-        setUploadedFiles(dedupedFiles.map(item => item.fileData));
+        const uploadedFilesData = dedupedFiles.map(item => item.fileData);
+        
+        // Combine default user files + uploaded files
+        const allUserFiles = [...user.files, ...uploadedFilesData];
+        const mergedUser = { ...user, files: allUserFiles };
+        
+        setCurrentUser(mergedUser);
+        setIsLoggedIn(true);
+        setUploadedFiles(uploadedFilesData);
 
         // Re-create File objects for downloads/previews from base64
         savedFiles.forEach(({ fileData, base64 }) => {
@@ -399,7 +405,14 @@ export default function App() {
     const dedupedFiles = Array.from(
       new Map(savedFiles.map(f => [f.fileData.id, f])).values()
     );
-    setUploadedFiles(dedupedFiles.map(item => item.fileData));
+    const uploadedFilesData = dedupedFiles.map(item => item.fileData);
+    
+    // Combine default user files + uploaded files
+    const allUserFiles = [...user.files, ...uploadedFilesData];
+    const mergedUser = { ...user, files: allUserFiles };
+    setCurrentUser(mergedUser);
+    setUploadedFiles(uploadedFilesData);
+    
     dedupedFiles.forEach(({ fileData, base64 }) => {
       if (base64) {
         try {
@@ -436,30 +449,22 @@ export default function App() {
       return;
     }
 
+    // Start with fresh 50 files for new user - each user gets FILES 201-250 with GR-001 to GR-050
     const newUser: User = {
       username,
       password,
-      files: [
-        {
-          id: 'welcome',
-          name: 'Welcome.txt',
-          size: 512,
-          date: new Date().toISOString().split('T')[0],
-          type: 'file',
-          grNo: 'GR-001'
-        }
-      ]
+      files: generateSampleFiles(200 + Math.random() * 1000000, 1) // Generate 50 sample files for new user with unique IDs
     };
 
     USERS[username] = newUser;
     saveUsersToStorage();
     setCurrentUser(newUser);
     setIsLoggedIn(true);
+    setUploadedFiles([]); // Start with no uploaded files
 
     // Persist session for newly created user
     try { localStorage.setItem('sessionUser', newUser.username); } catch (e) { /* ignore */ }
 
-    setUploadedFiles([]);
     setUsername('');
     setPassword('');
     setIsSignUp(false);
@@ -476,42 +481,103 @@ export default function App() {
     setSelectedFile(null);
   };
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const buffer = Array.from(event.target.files || []);
-    
-    // Find the highest GR number to ensure uniqueness
-    const allExistingFiles = [...(currentUser?.files || []), ...uploadedFiles];
-    let maxGRNum = 0;
-    allExistingFiles.forEach(f => {
-      if (f.grNo) {
-        const num = parseInt(f.grNo.replace('GR-', ''), 10);
-        if (num > maxGRNum) maxGRNum = num;
-      }
-    });
-    
-    let grCounter = maxGRNum;
 
-    buffer.forEach(file => {
-      grCounter++; // Increment GR number for each file
-      const descriptor: FileData = {
-        id: `${Date.now()}-${Math.random()}`,
-        name: file.name,
-        size: file.size,
-        date: new Date().toISOString().split('T')[0],
-        type: 'file',
-        grNo: `GR-${String(grCounter).padStart(3, '0')}`
-      };
+    // Use a per-user persistent counter stored in localStorage to guarantee numeric-only GRs
+    // This minimizes duplicates across tabs on the same machine. It is not a replacement
+    // for a server-side global counter if you need cross-device guarantees.
+    const usernameKey = currentUser?.username || 'anon';
+    const counterKey = `gr_counter_${usernameKey}`;
+    const lockKey = `gr_lock_${usernameKey}`;
 
-      fileMapRef.current.set(descriptor.id, file);
-      if (currentUser) {
-        saveUploadedFile(currentUser.username, descriptor, file);
+    const acquireLock = async (timeout = 2000, wait = 50) => {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        const now = Date.now();
+        const existing = localStorage.getItem(lockKey);
+        if (!existing || now - Number(existing) > 5000) {
+          try {
+            localStorage.setItem(lockKey, String(now));
+            return true;
+          } catch (e) {
+            // ignore and retry
+          }
+        }
+        await new Promise(r => setTimeout(r, wait));
       }
-      // Deduplicate before adding new file
-      setUploadedFiles(prev => {
-        const withoutDupe = prev.filter(f => f.id !== descriptor.id);
-        return [...withoutDupe, descriptor];
+      return false;
+    };
+
+    const releaseLock = () => {
+      try { localStorage.removeItem(lockKey); } catch (e) { /* ignore */ }
+    };
+
+    let lockAcquired = false;
+    try {
+      lockAcquired = await acquireLock();
+
+      // Read persistent counter (falls back to scanning existing files if missing)
+      let stored = parseInt(localStorage.getItem(counterKey) || '0', 10);
+      if (!stored || stored <= 0) {
+        // Fallback: compute from existing files if counter not present
+        const allExistingFiles = [...(currentUser?.files || []), ...uploadedFiles];
+        let maxGRNum = 0;
+        allExistingFiles.forEach(f => {
+          if (f.grNo) {
+            // Support formats like "GR-001" or "GR-001-xyz"; extract numeric prefix
+            const parts = f.grNo.replace(/^GR-/, '').split('-');
+            const num = parseInt(parts[0], 10);
+            if (!isNaN(num) && num > maxGRNum) maxGRNum = num;
+          }
+        });
+        stored = maxGRNum;
+      }
+
+      let grCounter = stored;
+
+      buffer.forEach(file => {
+        grCounter++; // Increment GR number for each file
+        const descriptor: FileData = {
+          id: `${Date.now()}-${Math.random()}`,
+          name: file.name,
+          size: file.size,
+          date: new Date().toISOString().split('T')[0],
+          type: 'file',
+          // Numeric-only GR (padded). Example: GR-001, GR-002, ...
+          grNo: `GR-${String(grCounter).padStart(3, '0')}`
+        };
+
+        fileMapRef.current.set(descriptor.id, file);
+        if (currentUser) {
+          saveUploadedFile(currentUser.username, descriptor, file);
+        }
+        // Deduplicate before adding new file
+        setUploadedFiles(prev => {
+          const withoutDupe = prev.filter(f => f.id !== descriptor.id);
+          return [...withoutDupe, descriptor];
+        });
+        
+        // Also add to currentUser.files so it shows up in search
+        if (currentUser) {
+          setCurrentUser(prev => {
+            if (!prev) return prev;
+            const withoutDupe = prev.files.filter(f => f.id !== descriptor.id);
+            const updatedFiles = [...withoutDupe, descriptor];
+            const updatedUser = { ...prev, files: updatedFiles };
+            // Save to USERS and localStorage
+            USERS[prev.username] = updatedUser;
+            saveUsersToStorage();
+            return updatedUser;
+          });
+        }
       });
-    });
+
+      // Persist updated counter
+      try { localStorage.setItem(counterKey, String(grCounter)); } catch (e) { /* ignore */ }
+    } finally {
+      if (lockAcquired) releaseLock();
+    }
 
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -702,12 +768,12 @@ export default function App() {
     );
   }
 
-  const allFiles = [...currentUser.files, ...uploadedFiles];
+  const allFiles = currentUser?.files || [];
   const filtered = allFiles
     .filter(file => {
       const normalized = query.trim().toLowerCase();
       if (!normalized) return true;
-      return file.name.toLowerCase().includes(normalized) || file.grNo?.toLowerCase().includes(normalized);
+      return file.name.toLowerCase().includes(normalized) || (file.grNo || '').toLowerCase().includes(normalized);
     })
     .sort((a, b) => {
       if (sort === 'name') {
@@ -856,12 +922,24 @@ export default function App() {
         </View>
 
         <View style={styles.searchRow}>
-          <TextInput
-            style={styles.searchInput}
+          <input
+            style={{
+              width: '100%',
+              paddingTop: '12px',
+              paddingBottom: '12px',
+              paddingLeft: '16px',
+              paddingRight: '16px',
+              borderRadius: '10px',
+              border: '1px solid #475569',
+              backgroundColor: '#1e293b',
+              fontSize: '15px',
+              color: '#f1f5f9',
+              boxSizing: 'border-box' as any
+            }}
+            type="text"
             placeholder="Search by file name or GR number"
-            placeholderTextColor="#9ca3af"
             value={query}
-            onChangeText={setQuery}
+            onChange={(e) => setQuery(e.currentTarget.value)}
           />
         </View>
 
