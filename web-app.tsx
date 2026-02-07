@@ -289,6 +289,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'date' | 'date-asc' | 'name' | 'size'>('date');
+  const [dateFilter, setDateFilter] = useState('');
   const [uploadedFiles, setUploadedFiles] = useState<FileData[]>([]);
   const [selectedFile, setSelectedFile] = useState<FileData | null>(null);
   const [isReady, setIsReady] = useState(false);
@@ -745,8 +746,13 @@ export default function App() {
   const filtered = allFiles
     .filter(file => {
       const normalized = query.trim().toLowerCase();
-      if (!normalized) return true;
-      return file.name.toLowerCase().includes(normalized) || (file.grNo || '').toLowerCase().includes(normalized);
+      if (normalized && !file.name.toLowerCase().includes(normalized) && !(file.grNo || '').toLowerCase().includes(normalized)) {
+        return false;
+      }
+      if (dateFilter && file.date !== dateFilter) {
+        return false;
+      }
+      return true;
     })
     .sort((a, b) => {
       if (sort === 'name') {
@@ -947,6 +953,24 @@ export default function App() {
               </Pressable>
             ))}
           </View>
+
+          <input
+            type="date"
+            value={dateFilter}
+            onChange={(e) => setDateFilter(e.currentTarget.value)}
+            style={{
+              padding: '8px 12px',
+              borderRadius: '8px',
+              border: '1px solid #475569',
+              backgroundColor: '#1e293b',
+              color: '#cbd5e1',
+              fontSize: '13px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              outline: 'none',
+              marginBottom: '12px'
+            } as any}
+          />
 
           <Text style={styles.summaryText}>
             Showing {filtered.length} of {allFiles.length} files
