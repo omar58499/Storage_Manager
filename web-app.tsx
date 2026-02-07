@@ -428,8 +428,11 @@ export default function App() {
     // Process each file
     for (const file of buffer) {
       grCounter++;
+      // generate a Firebase-safe id (no '.', '#', '$', '[', or ']')
+      const randomSuffix = Math.random().toString(36).slice(2, 10);
+      const safeId = `${Date.now()}-${randomSuffix}`;
       const descriptor: FileData = {
-        id: `${Date.now()}-${Math.random()}`,
+        id: safeId,
         name: file.name,
         size: file.size,
         date: new Date().toISOString().split('T')[0],
