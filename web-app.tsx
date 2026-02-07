@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { auth, database } from './firebaseConfig';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { ref, set, get, update, remove, onValue } from 'firebase/database';
 
 interface FileData {
   id: string;
@@ -20,24 +23,6 @@ interface User {
   password: string;
   files: FileData[];
 }
-
-const USERS: Record<string, User> = {
-  user1: {
-    username: 'user1',
-    password: '1234',
-    files: []
-  },
-  user2: {
-    username: 'user2',
-    password: '5678',
-    files: []
-  },
-  admin: {
-    username: 'admin',
-    password: 'admin123',
-    files: []
-  }
-};
 
 const SORT_OPTIONS: Array<{ value: 'date' | 'date-asc' | 'name' | 'size'; label: string }> = [
   { value: 'date', label: 'Newest' },
@@ -245,89 +230,97 @@ const styles = StyleSheet.create({
   helperText: { fontSize: 13, color: '#94a3b8', marginBottom: 6, cursor: 'pointer', paddingVertical: 6, paddingHorizontal: 8, borderRadius: 6, userSelect: 'none' as any }
 });
 
-const saveUploadedFile = (username: string, fileData: FileData, file: File) => {
-  const reader = new FileReader();
-  reader.onload = event => {
-    const base64 = event.target?.result;
-    const userFiles = JSON.parse(localStorage.getItem(`uploaded_${username}`) || '[]');
-    userFiles.push({ fileData, base64 });
-    localStorage.setItem(`uploaded_${username}`, JSON.stringify(userFiles));
-  };
-  reader.readAsDataURL(file);
+// Firebase helper functions
+const saveUploadedFile = async (userId: string, fileData: FileData, base64: string) => {
+  try {
+    const fileRef = ref(database, `users/${userId}/files/${fileData.id}`);
+    await set(fileRef, { ...fileData, base64 });
+  } catch (error) {
+    console.error('Error saving file to Firebase:', error);
+  }
 };
 
-const loadUploadedFiles = (username: string): StoredFile[] => {
+const loadUploadedFiles = async (userId: string): Promise<(FileData & { base64: string })[]> => {
   try {
-    return JSON.parse(localStorage.getItem(`uploaded_${username}`) || '[]');
+    const filesRef = ref(database, `users/${userId}/files`);
+    const snapshot = await get(filesRef);
+    if (snapshot.exists()) {
+      return Object.values(snapshot.val());
+    }
+    return [];
   } catch (error) {
-    console.warn('Could not parse uploaded files', error);
+    console.error('Error loading files from Firebase:', error);
     return [];
   }
 };
 
-const saveUsersToStorage = () => {
-  localStorage.setItem('USERS', JSON.stringify(USERS));
+const deleteFileFromFirebase = async (userId: string, fileId: string) => {
+  try {
+    const fileRef = ref(database, `users/${userId}/files/${fileId}`);
+    await remove(fileRef);
+  } catch (error) {
+    console.error('Error deleting file from Firebase:', error);
+  }
 };
 
-const loadUsersFromStorage = () => {
+const saveGRCounter = async (userId: string, counter: number) => {
   try {
-    const stored = localStorage.getItem('USERS');
-    if (stored) {
-      Object.assign(USERS, JSON.parse(stored));
-    }
+    const counterRef = ref(database, `users/${userId}/grCounter`);
+    await set(counterRef, counter);
   } catch (error) {
-    console.warn('Could not load users from storage', error);
+    console.error('Error saving GR counter:', error);
+  }
+};
+
+const loadGRCounter = async (userId: string): Promise<number> => {
+  try {
+    const counterRef = ref(database, `users/${userId}/grCounter`);
+    const snapshot = await get(counterRef);
+    return snapshot.exists() ? snapshot.val() : 0;
+  } catch (error) {
+    console.error('Error loading GR counter:', error);
+    return 0;
   }
 };
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isSignUp, setIsSignUp] = useState(false);
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'date' | 'date-asc' | 'name' | 'size'>('date');
   const [dateFilter, setDateFilter] = useState('');
-  const [uploadedFiles, setUploadedFiles] = useState<FileData[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<(FileData & { base64: string })[]>([]);
   const [selectedFile, setSelectedFile] = useState<FileData | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ fileId: string; fileName: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileMapRef = useRef<Map<string, File>>(new Map());
 
+  // Firebase auth listener
   useEffect(() => {
-    loadUsersFromStorage();
-
-    // Restore session from localStorage so refreshing keeps user logged in
-    try {
-      const sessionUser = localStorage.getItem('sessionUser');
-      if (sessionUser && USERS[sessionUser]) {
-        const user = USERS[sessionUser];
-        
-        // Load any uploaded files saved for this user
-        const savedFiles = loadUploadedFiles(sessionUser);
-        // Deduplicate by ID to prevent duplicates on refresh
-        const dedupedFiles = Array.from(
-          new Map(savedFiles.map(f => [f.fileData.id, f])).values()
-        );
-        const uploadedFilesData = dedupedFiles.map(item => item.fileData);
-        
-        // Combine default user files + uploaded files
-        const allUserFiles = [...user.files, ...uploadedFilesData];
-        const mergedUser = { ...user, files: allUserFiles };
-        
-        setCurrentUser(mergedUser);
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setFirebaseUser(user);
         setIsLoggedIn(true);
-        setUploadedFiles(uploadedFilesData);
-
-        // Re-create File objects for downloads/previews from base64
-        savedFiles.forEach(({ fileData, base64 }) => {
-          if (base64) {
+        const userObj: User = {
+          username: user.email || '',
+          password: '',
+          files: []
+        };
+        setCurrentUser(userObj);
+        // Load user's files from Firebase
+        const files = await loadUploadedFiles(user.uid);
+        setUploadedFiles(files);
+        // Recreate File objects for downloads
+        files.forEach(file => {
+          if (file.base64) {
             try {
-              // Convert data URL to Blob
-              const arr = base64.split(',');
+              const arr = file.base64.split(',');
               const mimeMatch = arr[0].match(/:(.*?);/) || ['', 'application/octet-stream'];
               const mime = mimeMatch[1];
               const bstr = atob(arr[1]);
@@ -337,202 +330,112 @@ export default function App() {
                 u8arr[i] = bstr.charCodeAt(i);
               }
               const blob = new Blob([u8arr], { type: mime });
-              const file = new File([blob], fileData.name, { type: mime });
-              fileMapRef.current.set(fileData.id, file);
+              const fileObj = new File([blob], file.name, { type: mime });
+              fileMapRef.current.set(file.id, fileObj);
             } catch (err) {
-              console.warn(`Failed to restore file blob for ${fileData.name}`, err);
+              console.warn(`Failed to restore file blob for ${file.name}`, err);
             }
           }
         });
+      } else {
+        setFirebaseUser(null);
+        setIsLoggedIn(false);
+        setCurrentUser(null);
+        setUploadedFiles([]);
+        fileMapRef.current.clear();
       }
-    } catch (err) {
-      console.warn('Failed to restore session', err);
-    }
+      setIsReady(true);
+    });
 
-    setIsReady(true);
+    return () => unsubscribe();
   }, []);
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
     setError('');
-    const user = USERS[username];
-    if (!user || user.password !== password) {
-      setError('Invalid username or password');
-      return;
-    }
-
-    setCurrentUser(user);
-    setIsLoggedIn(true);
-
-    // Persist session so refresh keeps the user logged in
-    try { localStorage.setItem('sessionUser', username); } catch (e) { /* ignore */ }
-
-    const savedFiles = loadUploadedFiles(username);
-    // Deduplicate by ID to prevent duplicates
-    const dedupedFiles = Array.from(
-      new Map(savedFiles.map(f => [f.fileData.id, f])).values()
-    );
-    const uploadedFilesData = dedupedFiles.map(item => item.fileData);
-    
-    // Combine default user files + uploaded files
-    const allUserFiles = [...user.files, ...uploadedFilesData];
-    const mergedUser = { ...user, files: allUserFiles };
-    setCurrentUser(mergedUser);
-    setUploadedFiles(uploadedFilesData);
-    
-    dedupedFiles.forEach(({ fileData, base64 }) => {
-      if (base64) {
-        try {
-          // Convert data URL to Blob
-          const arr = base64.split(',');
-          const mimeMatch = arr[0].match(/:(.*?);/) || ['', 'application/octet-stream'];
-          const mime = mimeMatch[1];
-          const bstr = atob(arr[1]);
-          const n = bstr.length;
-          const u8arr = new Uint8Array(n);
-          for (let i = 0; i < n; i++) {
-            u8arr[i] = bstr.charCodeAt(i);
-          }
-          const blob = new Blob([u8arr], { type: mime });
-          const file = new File([blob], fileData.name, { type: mime });
-          fileMapRef.current.set(fileData.id, file);
-        } catch (err) {
-          console.warn(`Failed to restore file blob for ${fileData.name}`, err);
-        }
-      }
-    });
-    setUsername('');
-    setPassword('');
-  };
-
-  const handleSignUp = () => {
-    setError('');
-    if (!username || !password) {
+    if (!email || !password) {
       setError('Please fill in all fields');
       return;
     }
-    // Trim username and check
-    const trimmedUsername = username.trim();
-    if (USERS[trimmedUsername]) {
-      setError('Username already exists. Try a different name like "myname123"');
-      return;
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      setEmail('');
+      setPassword('');
+    } catch (err: any) {
+      setError(err.message || 'Login failed');
     }
-
-    const newUser: User = {
-      username: trimmedUsername,
-      password,
-      files: []
-    };
-
-    USERS[trimmedUsername] = newUser;
-    saveUsersToStorage();
-    
-    // Clear any old session data and file references
-    try { localStorage.removeItem(`uploaded_${trimmedUsername}`); } catch (e) { /* ignore */ }
-    fileMapRef.current.clear(); // Clear file map for fresh start
-    
-    setCurrentUser(newUser);
-    setIsLoggedIn(true);
-    setUploadedFiles([]); // Start with no uploaded files - completely fresh
-    setQuery(''); // Clear search
-
-    // Persist session for newly created user
-    try { localStorage.setItem('sessionUser', trimmedUsername); } catch (e) { /* ignore */ }
-
-    setUsername('');
-    setPassword('');
-    setIsSignUp(false);
   };
 
-  const handleLogout = () => {
-    // Clear session persistence
-    try { localStorage.removeItem('sessionUser'); } catch (e) { /* ignore */ }
+  const handleSignUp = async () => {
+    setError('');
+    if (!email || !password) {
+      setError('Please fill in all fields');
+      return;
+    }
+    try {
+      await createUserWithEmailAndPassword(auth, email, password);
+      setEmail('');
+      setPassword('');
+      setIsSignUp(false);
+    } catch (err: any) {
+      setError(err.message || 'Sign up failed');
+    }
+  };
 
-    setIsLoggedIn(false);
-    setCurrentUser(null);
-    setUploadedFiles([]);
-    setQuery('');
-    setSelectedFile(null);
-    fileMapRef.current.clear(); // Clear file references
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err: any) {
+      setError(err.message || 'Logout failed');
+    }
   };
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!firebaseUser) return;
+
     const buffer = Array.from(event.target.files || []);
 
-    // Use a per-user persistent counter stored in localStorage to guarantee numeric-only GRs
-    // This minimizes duplicates across tabs on the same machine. It is not a replacement
-    // for a server-side global counter if you need cross-device guarantees.
-    const usernameKey = currentUser?.username || 'anon';
-    const counterKey = `gr_counter_${usernameKey}`;
-    const lockKey = `gr_lock_${usernameKey}`;
+    // Load current GR counter from Firebase
+    let grCounter = await loadGRCounter(firebaseUser.uid);
 
-    const acquireLock = async (timeout = 2000, wait = 50) => {
-      const start = Date.now();
-      while (Date.now() - start < timeout) {
-        const now = Date.now();
-        const existing = localStorage.getItem(lockKey);
-        if (!existing || now - Number(existing) > 5000) {
-          try {
-            localStorage.setItem(lockKey, String(now));
-            return true;
-          } catch (e) {
-            // ignore and retry
-          }
+    if (!grCounter || grCounter <= 0) {
+      // Fallback: compute from existing files if counter not present
+      let maxGRNum = 0;
+      uploadedFiles.forEach(f => {
+        if (f.grNo) {
+          const parts = f.grNo.replace(/^GR-/, '').split('-');
+          const num = parseInt(parts[0], 10);
+          if (!isNaN(num) && num > maxGRNum) maxGRNum = num;
         }
-        await new Promise(r => setTimeout(r, wait));
-      }
-      return false;
-    };
+      });
+      grCounter = maxGRNum;
+    }
 
-    const releaseLock = () => {
-      try { localStorage.removeItem(lockKey); } catch (e) { /* ignore */ }
-    };
+    // Process each file
+    for (const file of buffer) {
+      grCounter++;
+      const descriptor: FileData = {
+        id: `${Date.now()}-${Math.random()}`,
+        name: file.name,
+        size: file.size,
+        date: new Date().toISOString().split('T')[0],
+        type: 'file',
+        grNo: `GR-${String(grCounter).padStart(3, '0')}`
+      };
 
-    let lockAcquired = false;
-    try {
-      lockAcquired = await acquireLock();
+      fileMapRef.current.set(descriptor.id, file);
 
-      // Read persistent counter (falls back to scanning existing files if missing)
-      let stored = parseInt(localStorage.getItem(counterKey) || '0', 10);
-      if (!stored || stored <= 0) {
-        // Fallback: compute from existing files if counter not present
-        const allExistingFiles = [...(currentUser?.files || []), ...uploadedFiles];
-        let maxGRNum = 0;
-        allExistingFiles.forEach(f => {
-          if (f.grNo) {
-            // Support formats like "GR-001" or "GR-001-xyz"; extract numeric prefix
-            const parts = f.grNo.replace(/^GR-/, '').split('-');
-            const num = parseInt(parts[0], 10);
-            if (!isNaN(num) && num > maxGRNum) maxGRNum = num;
-          }
-        });
-        stored = maxGRNum;
-      }
+      // Convert file to base64
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const base64 = e.target?.result as string;
+        await saveUploadedFile(firebaseUser.uid, descriptor, base64);
 
-      let grCounter = stored;
-
-      buffer.forEach(file => {
-        grCounter++; // Increment GR number for each file
-        const descriptor: FileData = {
-          id: `${Date.now()}-${Math.random()}`,
-          name: file.name,
-          size: file.size,
-          date: new Date().toISOString().split('T')[0],
-          type: 'file',
-          // Numeric-only GR (padded). Example: GR-001, GR-002, ...
-          grNo: `GR-${String(grCounter).padStart(3, '0')}`
-        };
-
-        fileMapRef.current.set(descriptor.id, file);
-        if (currentUser) {
-          saveUploadedFile(currentUser.username, descriptor, file);
-        }
-        // Deduplicate before adding new file
+        // Update local state
         setUploadedFiles(prev => {
           const withoutDupe = prev.filter(f => f.id !== descriptor.id);
-          return [...withoutDupe, descriptor];
+          return [...withoutDupe, { ...descriptor, base64 }];
         });
-        
-        // Update currentUser.files to reflect uploaded file
+
         if (currentUser) {
           setCurrentUser(prev => {
             if (!prev) return prev;
@@ -541,13 +444,12 @@ export default function App() {
             return { ...prev, files: updatedFiles };
           });
         }
-      });
-
-      // Persist updated counter
-      try { localStorage.setItem(counterKey, String(grCounter)); } catch (e) { /* ignore */ }
-    } finally {
-      if (lockAcquired) releaseLock();
+      };
+      reader.readAsDataURL(file);
     }
+
+    // Save updated counter
+    await saveGRCounter(firebaseUser.uid, grCounter);
 
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -585,8 +487,8 @@ export default function App() {
     setDeleteConfirmation({ fileId, fileName });
   };
 
-  const handleConfirmDelete = () => {
-    if (!deleteConfirmation || !currentUser) return;
+  const handleConfirmDelete = async () => {
+    if (!deleteConfirmation || !currentUser || !firebaseUser) return;
 
     const { fileId } = deleteConfirmation;
 
@@ -598,10 +500,8 @@ export default function App() {
     const updatedUser = { ...currentUser, files: updatedFiles };
     setCurrentUser(updatedUser);
 
-    // Remove from localStorage (persistent storage)
-    const savedFiles = loadUploadedFiles(currentUser.username);
-    const filteredSavedFiles = savedFiles.filter(f => f.fileData.id !== fileId);
-    localStorage.setItem(`uploaded_${currentUser.username}`, JSON.stringify(filteredSavedFiles));
+    // Remove from Firebase
+    await deleteFileFromFirebase(firebaseUser.uid, fileId);
 
     // Clear file map reference
     fileMapRef.current.delete(fileId);
@@ -656,10 +556,10 @@ export default function App() {
 
           <TextInput
             style={[styles.input, error ? styles.errorInput : null]}
-            placeholder="Username"
-            value={username}
+            placeholder="Email"
+            value={email}
             onChangeText={text => {
-              setUsername(text.trim());
+              setEmail(text.trim());
               setError('');
             }}
             placeholderTextColor="#9ca3af"
@@ -683,7 +583,7 @@ export default function App() {
             onPress={isSignUp ? handleSignUp : handleLogin}
             style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
           >
-            <Text style={styles.buttonText}>{isSignUp ? 'Sign Up' : 'Sign In'}</Text>
+            <Text style={styles.buttonText}>{isSignUp ? 'Create Account' : 'Sign In'}</Text>
           </Pressable>
 
           <Pressable
@@ -699,44 +599,22 @@ export default function App() {
           </Pressable>
 
           <View style={styles.helperBlock}>
-            <Text style={styles.helperHeading}>👤 Try Demo Accounts</Text>
-            <Pressable
-              onPress={() => {
-                setUsername('user1');
-                setPassword('1234');
-                setError('');
-              }}
-              style={({ pressed }) => [styles.helperText, pressed && { backgroundColor: 'rgba(0,0,0,0.05)' }]}
-            >
-              <Text style={{ color: 'inherit' }}>user1 / 1234</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                setUsername('user2');
-                setPassword('5678');
-                setError('');
-              }}
-              style={({ pressed }) => [styles.helperText, pressed && { backgroundColor: 'rgba(0,0,0,0.05)' }]}
-            >
-              <Text style={{ color: 'inherit' }}>user2 / 5678</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                setUsername('admin');
-                setPassword('admin123');
-                setError('');
-              }}
-              style={({ pressed }) => [styles.helperText, pressed && { backgroundColor: 'rgba(0,0,0,0.05)' }]}
-            >
-              <Text style={{ color: 'inherit' }}>admin / admin123</Text>
-            </Pressable>
+            <Text style={styles.helperHeading}>📝 Getting Started</Text>
+            <Text style={{ color: '#94a3b8', marginBottom: 12, fontSize: 13, lineHeight: 1.5 }}>
+              {isSignUp 
+                ? 'Create an account with your email and password to start storing files.' 
+                : 'Sign in with your email and password to access your files.'}
+            </Text>
+            <Text style={{ color: '#64748b', fontSize: 12 }}>
+              Files are automatically saved to the cloud after upload.
+            </Text>
           </View>
         </View>
       </View>
     );
   }
 
-  const allFiles = currentUser?.files || [];
+  const allFiles = uploadedFiles.length > 0 ? uploadedFiles : (currentUser?.files || []);
   const filtered = allFiles
     .filter(file => {
       const normalized = query.trim().toLowerCase();
@@ -891,7 +769,7 @@ export default function App() {
               <Text style={styles.logoutText}>Logout</Text>
             </Pressable>
           </View>
-          <Text style={styles.userInfo}>Signed in as {currentUser.username}</Text>
+          <Text style={styles.userInfo}>Signed in as {firebaseUser?.email}</Text>
         </View>
 
         <View style={styles.searchRow}>
