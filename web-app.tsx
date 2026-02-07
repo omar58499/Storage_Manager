@@ -356,6 +356,12 @@ export default function App() {
       setError('Please fill in all fields');
       return;
     }
+    // Basic email format validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      setError('Please enter a valid email address');
+      return;
+    }
     try {
       await signInWithEmailAndPassword(auth, email, password);
       setEmail('');
@@ -369,6 +375,12 @@ export default function App() {
     setError('');
     if (!email || !password) {
       setError('Please fill in all fields');
+      return;
+    }
+    // Basic email format validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      setError('Please enter a valid email address');
       return;
     }
     try {
@@ -522,23 +534,7 @@ export default function App() {
       <View style={styles.authContainer}>
         {/* Left side branding */}
         <View style={{ position: 'absolute', left: '5%', top: '50%', transform: [{ translateY: -140 }], zIndex: 2, alignItems: 'flex-start' }}>
-          {/* Modern SVG folder logo */}
-          <svg width="160" height="160" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
-            <defs>
-              <linearGradient id="g1" x1="0" x2="1" y1="0" y2="1">
-                <stop offset="0%" stopColor="#2563eb" />
-                <stop offset="100%" stopColor="#3b82f6" />
-              </linearGradient>
-              <filter id="f1" x="-20%" y="-20%" width="140%" height="140%">
-                <feDropShadow dx="0" dy="8" stdDeviation="18" floodOpacity="0.18" floodColor="#0b5ddf" />
-              </filter>
-            </defs>
-            <g filter="url(#f1)">
-              <rect x="4" y="18" width="56" height="34" rx="6" fill="url(#g1)" />
-              <path d="M10 18 L20 10 H44 L54 18 Z" fill="#fff" opacity="0.06" />
-              <path d="M12 22 L52 22" stroke="#ffffff" strokeOpacity="0.06" strokeWidth="1" />
-            </g>
-          </svg>
+          <Text style={{ fontSize: 100 }}>📂</Text>
 
           <Text style={{ fontSize: 56, fontWeight: '800', color: 'white', marginTop: 18, marginBottom: 6, letterSpacing: -1 as any }}>
             File Explorer
@@ -556,8 +552,10 @@ export default function App() {
 
           <TextInput
             style={[styles.input, error ? styles.errorInput : null]}
-            placeholder="Email"
+            placeholder="Email (e.g. you@example.com)"
             value={email}
+            keyboardType="email-address"
+            autoCapitalize="none"
             onChangeText={text => {
               setEmail(text.trim());
               setError('');
