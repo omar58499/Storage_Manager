@@ -686,22 +686,44 @@ export default function App() {
               <Text style={{ color: '#94a3b8', marginBottom: 20 } as any}>To preview this file, upload your own file using the upload button</Text>
             </View>
           ) : ext === 'pdf' ? (
-            <View style={{ width: '90%', height: '90%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1e293b', borderRadius: 8, borderWidth: 1, borderColor: '#334155' } as any}>
-              <iframe title={selectedFile.name} src={url} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8 }} />
+            <View style={{ paddingVertical: 40, paddingHorizontal: 40, backgroundColor: '#1e293b', borderRadius: 8, textAlign: 'center', maxWidth: 600, borderWidth: 1, borderColor: '#334155' } as any}>
+              <Text style={{ fontSize: 48, marginBottom: 20 } as any}>📄</Text>
+              <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 10, color: '#f1f5f9' } as any}>{selectedFile.name}</Text>
+              <Text style={{ color: '#cbd5e1', marginBottom: 20 } as any}>PDF File</Text>
+              <Text style={{ color: '#94a3b8', marginBottom: 20 } as any}>Download to preview the PDF</Text>
+              <Pressable
+                onPress={handleDownloadFromPreview}
+                style={{ paddingVertical: 10, paddingHorizontal: 20, backgroundColor: '#3b82f6', borderRadius: 5, marginTop: 20, cursor: 'pointer' } as any}
+              >
+                <Text style={{ color: 'white', fontWeight: '600' } as any}>Download & Open</Text>
+              </Pressable>
             </View>
           ) : ext && ['mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg'].includes(ext) ? (
             <View style={{ paddingVertical: 40, paddingHorizontal: 40, backgroundColor: '#1e293b', borderRadius: 8, textAlign: 'center', maxWidth: 600, borderWidth: 1, borderColor: '#334155' } as any}>
               <Text style={{ fontSize: 64, marginBottom: 20 } as any}>🎵</Text>
               <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 10, color: '#f1f5f9' } as any}>{selectedFile.name}</Text>
-              <Text style={{ color: '#cbd5e1', marginBottom: 20 } as any}>Audio File Preview</Text>
-              <audio controls style={{ width: '100%', marginBottom: 20 }}>
-                <source src={url} type={`audio/${ext}`} />
-                Your browser does not support the audio element.
-              </audio>
+              <Text style={{ color: '#cbd5e1', marginBottom: 20 } as any}>Audio File</Text>
+              <Text style={{ color: '#94a3b8', marginBottom: 20 } as any}>Download to play audio</Text>
+              <Pressable
+                onPress={handleDownloadFromPreview}
+                style={{ paddingVertical: 10, paddingHorizontal: 20, backgroundColor: '#3b82f6', borderRadius: 5, marginTop: 20, cursor: 'pointer' } as any}
+              >
+                <Text style={{ color: 'white', fontWeight: '600' } as any}>Download & Play</Text>
+              </Pressable>
             </View>
           ) : ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext) ? (
-            <View style={{ width: '90%', height: '90%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1e293b', borderRadius: 8, paddingVertical: 20, paddingHorizontal: 20, borderWidth: 1, borderColor: '#334155' } as any}>
-              <img src={url} alt={selectedFile.name} style={{ maxWidth: '100%', maxHeight: '100%', borderRadius: 8 }} />
+            <View style={{ paddingVertical: 40, paddingHorizontal: 40, backgroundColor: '#1e293b', borderRadius: 8, textAlign: 'center', maxWidth: 600, borderWidth: 1, borderColor: '#334155' } as any}>
+              <Text style={{ fontSize: 48, marginBottom: 20 } as any}>🖼️</Text>
+              <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 10, color: '#f1f5f9' } as any}>{selectedFile.name}</Text>
+              <Text style={{ color: '#cbd5e1', marginBottom: 20 } as any}>Image File</Text>
+              <Text style={{ color: '#94a3b8', marginBottom: 20 } as any}>Size: {formatSize(selectedFile.size)}</Text>
+              <Text style={{ color: '#94a3b8', marginBottom: 20 } as any}>Download to view the image</Text>
+              <Pressable
+                onPress={handleDownloadFromPreview}
+                style={{ paddingVertical: 10, paddingHorizontal: 20, backgroundColor: '#3b82f6', borderRadius: 5, marginTop: 20, cursor: 'pointer' } as any}
+              >
+                <Text style={{ color: 'white', fontWeight: '600' } as any}>Download & View</Text>
+              </Pressable>
             </View>
           ) : ext === 'docx' ? (
             <View style={{ paddingVertical: 40, paddingHorizontal: 40, backgroundColor: '#1e293b', borderRadius: 8, textAlign: 'center', maxWidth: 600, borderWidth: 1, borderColor: '#334155' } as any}>
