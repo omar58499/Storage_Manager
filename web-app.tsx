@@ -231,12 +231,15 @@ const styles = StyleSheet.create({
 });
 
 // Firebase helper functions
-const saveUploadedFile = async (userId: string, fileData: FileData, base64: string) => {
+const saveUploadedFile = async (userId: string, fileData: FileData, base64: string): Promise<boolean> => {
   try {
     const fileRef = ref(database, `users/${userId}/files/${fileData.id}`);
     await set(fileRef, { ...fileData, base64 });
+    console.log(`Saved file ${fileData.name} (${fileData.id}) for user ${userId}`);
+    return true;
   } catch (error) {
     console.error('Error saving file to Firebase:', error);
+    return false;
   }
 };
 
@@ -438,11 +441,16 @@ export default function App() {
 
       // Convert file to base64
       const reader = new FileReader();
-      reader.onload = async (e) => {
+        reader.onload = async (e) => {
         const base64 = e.target?.result as string;
-        await saveUploadedFile(firebaseUser.uid, descriptor, base64);
+        const saved = await saveUploadedFile(firebaseUser.uid, descriptor, base64);
 
-        // Update local state
+        if (!saved) {
+          setError(`Failed to save ${descriptor.name} to cloud. Check console for details.`);
+          return;
+        }
+
+        // Update local state only after successful cloud save
         setUploadedFiles(prev => {
           const withoutDupe = prev.filter(f => f.id !== descriptor.id);
           return [...withoutDupe, { ...descriptor, base64 }];
