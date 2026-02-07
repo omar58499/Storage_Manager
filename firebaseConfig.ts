@@ -1,16 +1,15 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, connectAuthEmulator } from 'firebase/auth';
-import { getDatabase, connectDatabaseEmulator } from 'firebase/database';
+import { getAuth } from 'firebase/auth';
+import { getDatabase } from 'firebase/database';
 
-// Get these values from Firebase Console (https://console.firebase.google.com)
 const firebaseConfig = {
-  apiKey: "AIzaSyDnxXxXxXxXxXxXxXxXxXxXxXxXxXxXxX",
-  authDomain: "your-project.firebaseapp.com",
-  databaseURL: "https://your-project.firebaseio.com",
-  projectId: "your-project-id",
-  storageBucket: "your-project.appspot.com",
-  messagingSenderId: "123456789012",
-  appId: "1:123456789012:web:abcdef1234567890abcdef"
+  apiKey: "AIzaSyAYKVLvd-PW33uynlVr_CIcHphWBBBpg9o",
+  authDomain: "storagemanager-69c10.firebaseapp.com",
+  databaseURL: "https://storagemanager-69c10-default-rtdb.firebaseio.com",
+  projectId: "storagemanager-69c10",
+  storageBucket: "storagemanager-69c10.firebasestorage.app",
+  messagingSenderId: "107765379974",
+  appId: "1:107765379974:web:d1e2100cc6c8f6daf83207"
 };
 
 // Initialize Firebase
