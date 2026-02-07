@@ -532,17 +532,13 @@ export default function App() {
           return [...withoutDupe, descriptor];
         });
         
-        // Also add to currentUser.files so it shows up in search
+        // Update currentUser.files to reflect uploaded file
         if (currentUser) {
           setCurrentUser(prev => {
             if (!prev) return prev;
             const withoutDupe = prev.files.filter(f => f.id !== descriptor.id);
             const updatedFiles = [...withoutDupe, descriptor];
-            const updatedUser = { ...prev, files: updatedFiles };
-            // Save to USERS and localStorage
-            USERS[prev.username] = updatedUser;
-            saveUsersToStorage();
-            return updatedUser;
+            return { ...prev, files: updatedFiles };
           });
         }
       });
@@ -601,10 +597,8 @@ export default function App() {
     const updatedFiles = currentUser.files.filter(f => f.id !== fileId);
     const updatedUser = { ...currentUser, files: updatedFiles };
     setCurrentUser(updatedUser);
-    USERS[currentUser.username] = updatedUser;
-    saveUsersToStorage();
 
-    // Remove from localStorage if it's an uploaded file
+    // Remove from localStorage (persistent storage)
     const savedFiles = loadUploadedFiles(currentUser.username);
     const filteredSavedFiles = savedFiles.filter(f => f.fileData.id !== fileId);
     localStorage.setItem(`uploaded_${currentUser.username}`, JSON.stringify(filteredSavedFiles));
