@@ -21,56 +21,21 @@ interface User {
   files: FileData[];
 }
 
-// Helper to generate sample files
-const generateSampleFiles = (startId: number, startGR: number): FileData[] => {
-  const files: FileData[] = [];
-  const fileTypes = [
-    { ext: 'pdf', name: 'Document', size: () => Math.floor(Math.random() * 3000000) + 500000 },
-    { ext: 'xlsx', name: 'Spreadsheet', size: () => Math.floor(Math.random() * 1000000) + 200000 },
-    { ext: 'docx', name: 'Report', size: () => Math.floor(Math.random() * 2000000) + 300000 },
-    { ext: 'pptx', name: 'Presentation', size: () => Math.floor(Math.random() * 4000000) + 1000000 },
-    { ext: 'jpg', name: 'Image', size: () => Math.floor(Math.random() * 5000000) + 1000000 },
-    { ext: 'png', name: 'Screenshot', size: () => Math.floor(Math.random() * 3000000) + 500000 },
-    { ext: 'zip', name: 'Archive', size: () => Math.floor(Math.random() * 10000000) + 2000000 },
-    { ext: 'mp4', name: 'Video', size: () => Math.floor(Math.random() * 500000000) + 50000000 },
-    { ext: 'txt', name: 'Notes', size: () => Math.floor(Math.random() * 500000) + 50000 }
-  ];
-
-  let id = startId;
-  let gr = startGR;
-  for (let i = 0; i < 50; i++) {
-    const fileType = fileTypes[i % fileTypes.length];
-    const num = Math.floor(i / fileTypes.length) + 1;
-    const daysAgo = Math.floor(Math.random() * 60);
-    const date = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-    files.push({
-      id: String(id++),
-      name: `${fileType.name}${num}.${fileType.ext}`,
-      size: fileType.size(),
-      date,
-      type: 'file',
-      grNo: `GR-${String(gr++).padStart(3, '0')}`
-    });
-  }
-  return files;
-};
-
 const USERS: Record<string, User> = {
   user1: {
     username: 'user1',
     password: '1234',
-    files: generateSampleFiles(1, 1)
+    files: []
   },
   user2: {
     username: 'user2',
     password: '5678',
-    files: generateSampleFiles(101, 51)
+    files: []
   },
   admin: {
     username: 'admin',
     password: 'admin123',
-    files: generateSampleFiles(201, 101)
+    files: []
   }
 };
 
@@ -444,26 +409,33 @@ export default function App() {
       setError('Please fill in all fields');
       return;
     }
-    if (USERS[username]) {
-      setError('Username already exists');
+    // Trim username and check
+    const trimmedUsername = username.trim();
+    if (USERS[trimmedUsername]) {
+      setError('Username already exists. Try a different name like "myname123"');
       return;
     }
 
-    // Start with fresh 50 files for new user - each user gets FILES 201-250 with GR-001 to GR-050
     const newUser: User = {
-      username,
+      username: trimmedUsername,
       password,
-      files: generateSampleFiles(200 + Math.random() * 1000000, 1) // Generate 50 sample files for new user with unique IDs
+      files: []
     };
 
-    USERS[username] = newUser;
+    USERS[trimmedUsername] = newUser;
     saveUsersToStorage();
+    
+    // Clear any old session data and file references
+    try { localStorage.removeItem(`uploaded_${trimmedUsername}`); } catch (e) { /* ignore */ }
+    fileMapRef.current.clear(); // Clear file map for fresh start
+    
     setCurrentUser(newUser);
     setIsLoggedIn(true);
-    setUploadedFiles([]); // Start with no uploaded files
+    setUploadedFiles([]); // Start with no uploaded files - completely fresh
+    setQuery(''); // Clear search
 
     // Persist session for newly created user
-    try { localStorage.setItem('sessionUser', newUser.username); } catch (e) { /* ignore */ }
+    try { localStorage.setItem('sessionUser', trimmedUsername); } catch (e) { /* ignore */ }
 
     setUsername('');
     setPassword('');
@@ -479,6 +451,7 @@ export default function App() {
     setUploadedFiles([]);
     setQuery('');
     setSelectedFile(null);
+    fileMapRef.current.clear(); // Clear file references
   };
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
