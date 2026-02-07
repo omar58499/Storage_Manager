@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { auth, database } from './firebaseConfig';
+import { auth, database, storage } from './firebaseConfig';
+import { ref as storageRef, uploadBytes, uploadString, getDownloadURL } from 'firebase/storage';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { ref, set, get, update, remove, onValue } from 'firebase/database';
 
@@ -231,19 +232,30 @@ const styles = StyleSheet.create({
 });
 
 // Firebase helper functions
-const saveUploadedFile = async (userId: string, fileData: FileData, base64: string): Promise<boolean> => {
+const saveUploadedFile = async (userId: string, fileData: FileData, fileOrBase64: File | string): Promise<string | null> => {
   try {
+    const storageReference = storageRef(storage, `users/${userId}/files/${fileData.id}`);
+
+    if (fileOrBase64 instanceof File) {
+      await uploadBytes(storageReference, fileOrBase64);
+    } else {
+      await uploadString(storageReference, fileOrBase64, 'data_url');
+    }
+
+    const downloadURL = await getDownloadURL(storageReference);
+
     const fileRef = ref(database, `users/${userId}/files/${fileData.id}`);
-    await set(fileRef, { ...fileData, base64 });
-    console.log(`Saved file ${fileData.name} (${fileData.id}) for user ${userId}`);
-    return true;
+    await set(fileRef, { ...fileData, downloadURL });
+
+    console.log(`Saved file ${fileData.name} (${fileData.id}) for user ${userId} at ${downloadURL}`);
+    return downloadURL;
   } catch (error) {
     console.error('Error saving file to Firebase:', error);
-    return false;
+    return null;
   }
 };
 
-const loadUploadedFiles = async (userId: string): Promise<(FileData & { base64: string })[]> => {
+const loadUploadedFiles = async (userId: string): Promise<(FileData & { downloadURL?: string })[]> => {
   try {
     const filesRef = ref(database, `users/${userId}/files`);
     const snapshot = await get(filesRef);
@@ -297,7 +309,7 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'date' | 'date-asc' | 'name' | 'size'>('date');
   const [dateFilter, setDateFilter] = useState('');
-  const [uploadedFiles, setUploadedFiles] = useState<(FileData & { base64: string })[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<(FileData & { downloadURL?: string })[]>([]);
   const [selectedFile, setSelectedFile] = useState<FileData | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ fileId: string; fileName: string } | null>(null);
@@ -319,27 +331,19 @@ export default function App() {
         // Load user's files from Firebase
         const files = await loadUploadedFiles(user.uid);
         setUploadedFiles(files);
-        // Recreate File objects for downloads
-        files.forEach(file => {
-          if (file.base64) {
+        // Recreate File objects for downloads by fetching the storage download URL
+        for (const file of files) {
+          if ((file as any).downloadURL) {
             try {
-              const arr = file.base64.split(',');
-              const mimeMatch = arr[0].match(/:(.*?);/) || ['', 'application/octet-stream'];
-              const mime = mimeMatch[1];
-              const bstr = atob(arr[1]);
-              const n = bstr.length;
-              const u8arr = new Uint8Array(n);
-              for (let i = 0; i < n; i++) {
-                u8arr[i] = bstr.charCodeAt(i);
-              }
-              const blob = new Blob([u8arr], { type: mime });
-              const fileObj = new File([blob], file.name, { type: mime });
+              const res = await fetch((file as any).downloadURL);
+              const blob = await res.blob();
+              const fileObj = new File([blob], file.name, { type: blob.type || 'application/octet-stream' });
               fileMapRef.current.set(file.id, fileObj);
             } catch (err) {
-              console.warn(`Failed to restore file blob for ${file.name}`, err);
+              console.warn(`Failed to fetch file blob for ${file.name}`, err);
             }
           }
-        });
+        }
       } else {
         setFirebaseUser(null);
         setIsLoggedIn(false);
@@ -428,8 +432,10 @@ export default function App() {
     // Process each file
     for (const file of buffer) {
       grCounter++;
+      const randomSuffix = Math.random().toString(36).slice(2, 10);
+      const safeId = `${Date.now()}-${randomSuffix}`;
       const descriptor: FileData = {
-        id: `${Date.now()}-${Math.random()}`,
+        id: safeId,
         name: file.name,
         size: file.size,
         date: new Date().toISOString().split('T')[0],
@@ -437,35 +443,31 @@ export default function App() {
         grNo: `GR-${String(grCounter).padStart(3, '0')}`
       };
 
+      // Keep local file reference for immediate preview/download
       fileMapRef.current.set(descriptor.id, file);
 
-      // Convert file to base64
-      const reader = new FileReader();
-        reader.onload = async (e) => {
-        const base64 = e.target?.result as string;
-        const saved = await saveUploadedFile(firebaseUser.uid, descriptor, base64);
+      // Upload to Firebase Storage (handles large files) and save metadata
+      const downloadURL = await saveUploadedFile(firebaseUser.uid, descriptor, file);
 
-        if (!saved) {
-          setError(`Failed to save ${descriptor.name} to cloud. Check console for details.`);
-          return;
-        }
+      if (!downloadURL) {
+        setError(`Failed to save ${descriptor.name} to cloud. Check console for details.`);
+        continue;
+      }
 
-        // Update local state only after successful cloud save
-        setUploadedFiles(prev => {
-          const withoutDupe = prev.filter(f => f.id !== descriptor.id);
-          return [...withoutDupe, { ...descriptor, base64 }];
+      // Update local state only after successful cloud save
+      setUploadedFiles(prev => {
+        const withoutDupe = prev.filter(f => f.id !== descriptor.id);
+        return [...withoutDupe, { ...descriptor, downloadURL } as any];
+      });
+
+      if (currentUser) {
+        setCurrentUser(prev => {
+          if (!prev) return prev;
+          const withoutDupe = prev.files.filter(f => f.id !== descriptor.id);
+          const updatedFiles = [...withoutDupe, descriptor];
+          return { ...prev, files: updatedFiles };
         });
-
-        if (currentUser) {
-          setCurrentUser(prev => {
-            if (!prev) return prev;
-            const withoutDupe = prev.files.filter(f => f.id !== descriptor.id);
-            const updatedFiles = [...withoutDupe, descriptor];
-            return { ...prev, files: updatedFiles };
-          });
-        }
-      };
-      reader.readAsDataURL(file);
+      }
     }
 
     // Save updated counter
