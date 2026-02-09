@@ -233,27 +233,79 @@ const styles = StyleSheet.create({
 
 // Firebase helper functions
 const saveUploadedFile = async (userId: string, fileData: FileData, fileOrBase64: File | string): Promise<string | null> => {
+  // Try Firebase first (when not forced to local). If Firebase upload fails (CORS/network/permission),
+  // automatically attempt the local upload server as a fallback to keep development flow smooth.
+  let attemptedFirebase = false;
   try {
-    const storageReference = storageRef(storage, `users/${userId}/files/${fileData.id}`);
+    if (typeof storage !== 'undefined' && storage && !process.env.REACT_APP_FORCE_LOCAL_UPLOAD) {
+      attemptedFirebase = true;
+      const storageReference = storageRef(storage, `users/${userId}/files/${fileData.id}`);
+      console.debug('Uploading file to Storage', { path: storageReference.fullPath, userId, fileName: fileData.name, fileId: fileData.id });
 
-    if (fileOrBase64 instanceof File) {
-      // Include contentType metadata so Storage serves the correct MIME type
-      await uploadBytes(storageReference, fileOrBase64, { contentType: fileOrBase64.type || 'application/octet-stream' });
-    } else {
-      await uploadString(storageReference, fileOrBase64, 'data_url');
+      if (fileOrBase64 instanceof File) {
+        await uploadBytes(storageReference, fileOrBase64, { contentType: fileOrBase64.type || 'application/octet-stream' });
+      } else {
+        await uploadString(storageReference, fileOrBase64, 'data_url');
+      }
+
+      const downloadURL = await getDownloadURL(storageReference);
+      const fileRef = ref(database, `users/${userId}/files/${fileData.id}`);
+      await set(fileRef, { ...fileData, downloadURL });
+      console.log(`Saved file ${fileData.name} (${fileData.id}) for user ${userId} at ${downloadURL}`);
+      return downloadURL;
     }
-
-    const downloadURL = await getDownloadURL(storageReference);
-
-    const fileRef = ref(database, `users/${userId}/files/${fileData.id}`);
-    await set(fileRef, { ...fileData, downloadURL });
-
-    console.log(`Saved file ${fileData.name} (${fileData.id}) for user ${userId} at ${downloadURL}`);
-    return downloadURL;
-  } catch (error) {
-    console.error('Error saving file to Firebase:', error);
-    return null;
+  } catch (firebaseErr) {
+    console.warn('Firebase upload failed; will attempt local fallback', firebaseErr);
+    // Continue to attempt local upload below
   }
+
+  // Local upload fallback: POST to http://localhost:4000/upload (field name 'file')
+  if (fileOrBase64 instanceof File) {
+    try {
+      const form = new FormData();
+      form.append('file', fileOrBase64, fileOrBase64.name);
+      const res = await fetch(process.env.REACT_APP_LOCAL_UPLOAD_URL || 'http://localhost:4000/upload', {
+        method: 'POST',
+        body: form
+      });
+      if (!res.ok) throw new Error(`Local upload failed: ${res.status} ${res.statusText}`);
+      const json = await res.json();
+      const downloadURL = (process.env.REACT_APP_LOCAL_UPLOAD_URL_BASE || 'http://localhost:4000') + json.url;
+
+
+      // Save metadata to Realtime DB so UI still shows files. If that fails,
+      // persist metadata in browser localStorage as a fallback so files survive refresh.
+      try {
+        const fileRef = ref(database, `users/${userId}/files/${fileData.id}`);
+        await set(fileRef, { ...fileData, downloadURL });
+      } catch (dbErr) {
+        console.warn('Failed to save metadata to Realtime DB after local upload, saving to localStorage', dbErr);
+        try {
+          const key = `local_uploads_${userId || 'anon'}`;
+          const existing = JSON.parse(localStorage.getItem(key) || '[]');
+          // avoid duplicates
+          const without = (existing as any[]).filter((f: any) => f.id !== fileData.id);
+          without.push({ ...fileData, downloadURL });
+          localStorage.setItem(key, JSON.stringify(without));
+        } catch (lsErr) {
+          console.error('Failed to save local metadata to localStorage', lsErr);
+        }
+      }
+
+      console.log('Saved file locally at', downloadURL);
+      return downloadURL;
+    } catch (localErr) {
+      console.error('Local upload failed', localErr);
+      // If we attempted Firebase first, surface that combined failure in console
+      if (attemptedFirebase) {
+        console.error('Both Firebase and local upload failed');
+      }
+      return null;
+    }
+  }
+
+  // Not supporting base64 string uploads to local server right now
+  return null;
 };
 
 const loadUploadedFiles = async (userId: string): Promise<(FileData & { downloadURL?: string })[]> => {
@@ -261,9 +313,30 @@ const loadUploadedFiles = async (userId: string): Promise<(FileData & { download
     const filesRef = ref(database, `users/${userId}/files`);
     const snapshot = await get(filesRef);
     if (snapshot.exists()) {
-      return Object.values(snapshot.val());
+      const dbFiles = Object.values(snapshot.val());
+      // Also merge any locally persisted uploads (fallback when DB write failed)
+      try {
+        const key = `local_uploads_${userId || 'anon'}`;
+        const local = JSON.parse(localStorage.getItem(key) || '[]');
+        const merged = [...(dbFiles as any[])];
+        (local as any[]).forEach(lf => {
+          if (!merged.find(m => (m as any).id === lf.id)) merged.push(lf);
+        });
+        return merged;
+      } catch (lsErr) {
+        console.warn('Failed to merge local uploads', lsErr);
+        return dbFiles as any[];
+      }
     }
-    return [];
+    // No DB entries — return any locally persisted uploads for this user
+    try {
+      const key = `local_uploads_${userId || 'anon'}`;
+      const local = JSON.parse(localStorage.getItem(key) || '[]');
+      return local as any[];
+    } catch (lsErr) {
+      console.warn('Failed to load local uploads', lsErr);
+      return [];
+    }
   } catch (error) {
     console.error('Error loading files from Firebase:', error);
     return [];
@@ -370,6 +443,8 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Auto-upload removed: uploads now require explicit user confirmation.
+
   const handleLogin = async () => {
     setError('');
     if (!email || !password) {
@@ -440,95 +515,74 @@ export default function App() {
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
+
+    // No automatic upload — user must press Upload to confirm.
   };
 
   // Actually upload the file with the custom name and date
   const handleConfirmUpload = async () => {
-    if (!firebaseUser || pendingFiles.length === 0) return;
+    if (pendingFiles.length === 0) {
+      setError('No file selected.');
+      setUploadingFile(false);
+      return;
+    }
     setUploadingFile(true);
-
-    let grCounter = await loadGRCounter(firebaseUser.uid);
-    if (!grCounter || grCounter <= 0) {
-      let maxGRNum = 0;
-      uploadedFiles.forEach(f => {
-        if (f.grNo) {
-          const parts = f.grNo.replace(/^GR-/, '').split('-');
-          const num = parseInt(parts[0], 10);
-          if (!isNaN(num) && num > maxGRNum) maxGRNum = num;
-        }
+    setError('');
+    try {
+      const file = pendingFiles[currentPendingIndex];
+      const originalExt = file.name.includes('.') ? '.' + file.name.split('.').pop() : '';
+      const finalName = customFileName.trim() ? customFileName.trim() + originalExt : file.name;
+      const selectedDate = customDate || new Date().toISOString().split('T')[0];
+      const randomSuffix = Math.random().toString(36).slice(2, 10);
+      const safeId = `${Date.now()}-${randomSuffix}`;
+      const descriptor: FileData = {
+        id: safeId,
+        name: finalName,
+        size: file.size,
+        date: selectedDate,
+        type: 'file',
+        grNo: `GR-LOCAL`
+      };
+      fileMapRef.current.set(descriptor.id, file);
+      let base64Data = null;
+      try {
+        base64Data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('Failed to read file.'));
+          reader.readAsDataURL(file);
+        });
+      } catch (err: any) {
+        setError(err?.message || 'Failed to upload file. Please try again.');
+        setUploadingFile(false);
+        return;
+      }
+      setUploadedFiles(prev => {
+        const withoutDupe = prev.filter(f => f.id !== descriptor.id);
+        const updated = [...withoutDupe, { ...descriptor, downloadURL: base64Data } as any];
+        return updated;
       });
-      grCounter = maxGRNum;
+      setError('');
+      // Move to next file or close modal
+      const nextIndex = currentPendingIndex + 1;
+      if (nextIndex < pendingFiles.length) {
+        setCurrentPendingIndex(nextIndex);
+        const nextFile = pendingFiles[nextIndex];
+        const nextNameWithoutExt = nextFile.name.replace(/\.[^/.]+$/, '');
+        setCustomFileName(nextNameWithoutExt);
+        setCustomDate(new Date().toISOString().split('T')[0]);
+      } else {
+        setShowUploadModal(false);
+        setPendingFiles([]);
+        setCurrentPendingIndex(0);
+        setCustomFileName('');
+        setCustomDate('');
+      }
+    } catch (err) {
+      setError('Failed to upload file. Please try again.');
+    } finally {
+      setUploadingFile(false);
     }
-
-    const file = pendingFiles[currentPendingIndex];
-    grCounter++;
-
-    // Build file name: user's custom name + original extension
-    const originalExt = file.name.includes('.') ? '.' + file.name.split('.').pop() : '';
-    const finalName = customFileName.trim() ? customFileName.trim() + originalExt : file.name;
-    const selectedDate = customDate || new Date().toISOString().split('T')[0];
-
-    const randomSuffix = Math.random().toString(36).slice(2, 10);
-    const safeId = `${Date.now()}-${randomSuffix}`;
-    const descriptor: FileData = {
-      id: safeId,
-      name: finalName,
-      size: file.size,
-      date: selectedDate,
-      type: 'file',
-      grNo: `GR-${String(grCounter).padStart(3, '0')}`
-    };
-
-    console.log(`Uploading file: ${descriptor.name} with ID: ${descriptor.id}`);
-    fileMapRef.current.set(descriptor.id, file);
-
-    const downloadURL = await saveUploadedFile(firebaseUser.uid, descriptor, file);
-
-    // Add file to state even if Firebase upload fails (fallback mode)
-    setUploadedFiles(prev => {
-      const withoutDupe = prev.filter(f => f.id !== descriptor.id);
-      const updated = [...withoutDupe, { ...descriptor, downloadURL: downloadURL || `local://${descriptor.id}` } as any];
-      console.log(`Added file to upload state, now have ${updated.length} files`);
-      return updated;
-    });
-
-    if (currentUser) {
-      setCurrentUser(prev => {
-        if (!prev) return prev;
-        const withoutDupe = prev.files.filter(f => f.id !== descriptor.id);
-        const updatedFiles = [...withoutDupe, descriptor];
-        return { ...prev, files: updatedFiles };
-      });
-    }
-
-    if (!downloadURL) {
-      setError(`File added locally (cloud save may have failed). Check console for details.`);
-      console.warn(`Cloud upload may have failed for ${descriptor.name}, but file added locally`);
-    } else {
-      console.log(`Successfully uploaded ${descriptor.name}, URL: ${downloadURL}`);
-      setError(''); // Clear any errors on successful upload
-    }
-
-    await saveGRCounter(firebaseUser.uid, grCounter);
-
-    // Move to next file or close modal
-    const nextIndex = currentPendingIndex + 1;
-    if (nextIndex < pendingFiles.length) {
-      setCurrentPendingIndex(nextIndex);
-      const nextFile = pendingFiles[nextIndex];
-      const nextNameWithoutExt = nextFile.name.replace(/\.[^/.]+$/, '');
-      setCustomFileName(nextNameWithoutExt);
-      setCustomDate(new Date().toISOString().split('T')[0]);
-    } else {
-      // All files done
-      setShowUploadModal(false);
-      setPendingFiles([]);
-      setCurrentPendingIndex(0);
-      setCustomFileName('');
-      setCustomDate('');
-    }
-
-    setUploadingFile(false);
   };
 
   const handleCancelUpload = () => {

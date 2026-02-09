@@ -1,0 +1,18 @@
+[
+  {
+    "origin": [
+      "http://localhost:8081",
+      "http://localhost:19006",
+      "http://localhost:3000"
+    ],
+    "method": ["GET", "POST", "PUT", "OPTIONS", "HEAD"],
+    "responseHeader": [
+      "Content-Type",
+      "Authorization",
+      "x-firebase-gmpid",
+      "X-Goog-Upload-Protocol",
+      "X-Goog-Upload-Content-Type"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

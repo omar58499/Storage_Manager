@@ -732,13 +732,13 @@ function FileExplorer() {
         <div className="dashboard-box finder-box">
           <div className="box-icon">🔍</div>
           <h3>Find Files</h3>
-          <p>Search by name or GR number</p>
+          <p>Search by name or GR number</p>S
           <input
             type="text"
             className="finder-input"
             placeholder="Search files..."
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}s
+            onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
       </div>
