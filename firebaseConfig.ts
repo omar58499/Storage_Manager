@@ -8,7 +8,9 @@ const firebaseConfig = {
   authDomain: "storagemanager-69c10.firebaseapp.com",
   databaseURL: "https://storagemanager-69c10-default-rtdb.firebaseio.com",
   projectId: "storagemanager-69c10",
-  storageBucket: "storagemanager-69c10.firebasestorage.app",
+  // Use the default Cloud Storage bucket hostname (appspot.com)
+  // The previous value caused malformed requests/CORS failures in the browser.
+  storageBucket: "storagemanager-69c10.appspot.com",
   messagingSenderId: "107765379974",
   appId: "1:107765379974:web:d1e2100cc6c8f6daf83207"
 };

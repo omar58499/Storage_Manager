@@ -237,7 +237,8 @@ const saveUploadedFile = async (userId: string, fileData: FileData, fileOrBase64
     const storageReference = storageRef(storage, `users/${userId}/files/${fileData.id}`);
 
     if (fileOrBase64 instanceof File) {
-      await uploadBytes(storageReference, fileOrBase64);
+      // Include contentType metadata so Storage serves the correct MIME type
+      await uploadBytes(storageReference, fileOrBase64, { contentType: fileOrBase64.type || 'application/octet-stream' });
     } else {
       await uploadString(storageReference, fileOrBase64, 'data_url');
     }
@@ -313,8 +314,20 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<FileData | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ fileId: string; fileName: string } | null>(null);
+  const [currentPage, setCurrentPage] = useState<'dashboard' | 'upload' | 'find'>('dashboard');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileMapRef = useRef<Map<string, File>>(new Map());
+
+  // Upload rename & date modal state
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [customFileName, setCustomFileName] = useState('');
+  const [customDate, setCustomDate] = useState('');
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [currentPendingIndex, setCurrentPendingIndex] = useState(0);
+
+  // Date filter for Find page
+  const [searchDateFilter, setSearchDateFilter] = useState('');
 
   // Firebase auth listener
   useEffect(() => {
@@ -408,16 +421,34 @@ export default function App() {
     }
   };
 
-  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  // When user picks files, show the rename/date modal instead of uploading immediately
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!firebaseUser) return;
-
+    setError('');
     const buffer = Array.from(event.target.files || []);
+    if (buffer.length === 0) return;
 
-    // Load current GR counter from Firebase
+    // Store files and open modal starting with the first file
+    setPendingFiles(buffer);
+    setCurrentPendingIndex(0);
+    const firstFile = buffer[0];
+    const nameWithoutExt = firstFile.name.replace(/\.[^/.]+$/, '');
+    setCustomFileName(nameWithoutExt);
+    setCustomDate(new Date().toISOString().split('T')[0]);
+    setShowUploadModal(true);
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  // Actually upload the file with the custom name and date
+  const handleConfirmUpload = async () => {
+    if (!firebaseUser || pendingFiles.length === 0) return;
+    setUploadingFile(true);
+
     let grCounter = await loadGRCounter(firebaseUser.uid);
-
     if (!grCounter || grCounter <= 0) {
-      // Fallback: compute from existing files if counter not present
       let maxGRNum = 0;
       uploadedFiles.forEach(f => {
         if (f.grNo) {
@@ -429,53 +460,83 @@ export default function App() {
       grCounter = maxGRNum;
     }
 
-    // Process each file
-    for (const file of buffer) {
-      grCounter++;
-      const randomSuffix = Math.random().toString(36).slice(2, 10);
-      const safeId = `${Date.now()}-${randomSuffix}`;
-      const descriptor: FileData = {
-        id: safeId,
-        name: file.name,
-        size: file.size,
-        date: new Date().toISOString().split('T')[0],
-        type: 'file',
-        grNo: `GR-${String(grCounter).padStart(3, '0')}`
-      };
+    const file = pendingFiles[currentPendingIndex];
+    grCounter++;
 
-      // Keep local file reference for immediate preview/download
-      fileMapRef.current.set(descriptor.id, file);
+    // Build file name: user's custom name + original extension
+    const originalExt = file.name.includes('.') ? '.' + file.name.split('.').pop() : '';
+    const finalName = customFileName.trim() ? customFileName.trim() + originalExt : file.name;
+    const selectedDate = customDate || new Date().toISOString().split('T')[0];
 
-      // Upload to Firebase Storage (handles large files) and save metadata
-      const downloadURL = await saveUploadedFile(firebaseUser.uid, descriptor, file);
+    const randomSuffix = Math.random().toString(36).slice(2, 10);
+    const safeId = `${Date.now()}-${randomSuffix}`;
+    const descriptor: FileData = {
+      id: safeId,
+      name: finalName,
+      size: file.size,
+      date: selectedDate,
+      type: 'file',
+      grNo: `GR-${String(grCounter).padStart(3, '0')}`
+    };
 
-      if (!downloadURL) {
-        setError(`Failed to save ${descriptor.name} to cloud. Check console for details.`);
-        continue;
-      }
+    console.log(`Uploading file: ${descriptor.name} with ID: ${descriptor.id}`);
+    fileMapRef.current.set(descriptor.id, file);
 
-      // Update local state only after successful cloud save
-      setUploadedFiles(prev => {
-        const withoutDupe = prev.filter(f => f.id !== descriptor.id);
-        return [...withoutDupe, { ...descriptor, downloadURL } as any];
+    const downloadURL = await saveUploadedFile(firebaseUser.uid, descriptor, file);
+
+    // Add file to state even if Firebase upload fails (fallback mode)
+    setUploadedFiles(prev => {
+      const withoutDupe = prev.filter(f => f.id !== descriptor.id);
+      const updated = [...withoutDupe, { ...descriptor, downloadURL: downloadURL || `local://${descriptor.id}` } as any];
+      console.log(`Added file to upload state, now have ${updated.length} files`);
+      return updated;
+    });
+
+    if (currentUser) {
+      setCurrentUser(prev => {
+        if (!prev) return prev;
+        const withoutDupe = prev.files.filter(f => f.id !== descriptor.id);
+        const updatedFiles = [...withoutDupe, descriptor];
+        return { ...prev, files: updatedFiles };
       });
-
-      if (currentUser) {
-        setCurrentUser(prev => {
-          if (!prev) return prev;
-          const withoutDupe = prev.files.filter(f => f.id !== descriptor.id);
-          const updatedFiles = [...withoutDupe, descriptor];
-          return { ...prev, files: updatedFiles };
-        });
-      }
     }
 
-    // Save updated counter
+    if (!downloadURL) {
+      setError(`File added locally (cloud save may have failed). Check console for details.`);
+      console.warn(`Cloud upload may have failed for ${descriptor.name}, but file added locally`);
+    } else {
+      console.log(`Successfully uploaded ${descriptor.name}, URL: ${downloadURL}`);
+      setError(''); // Clear any errors on successful upload
+    }
+
     await saveGRCounter(firebaseUser.uid, grCounter);
 
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+    // Move to next file or close modal
+    const nextIndex = currentPendingIndex + 1;
+    if (nextIndex < pendingFiles.length) {
+      setCurrentPendingIndex(nextIndex);
+      const nextFile = pendingFiles[nextIndex];
+      const nextNameWithoutExt = nextFile.name.replace(/\.[^/.]+$/, '');
+      setCustomFileName(nextNameWithoutExt);
+      setCustomDate(new Date().toISOString().split('T')[0]);
+    } else {
+      // All files done
+      setShowUploadModal(false);
+      setPendingFiles([]);
+      setCurrentPendingIndex(0);
+      setCustomFileName('');
+      setCustomDate('');
     }
+
+    setUploadingFile(false);
+  };
+
+  const handleCancelUpload = () => {
+    setShowUploadModal(false);
+    setPendingFiles([]);
+    setCurrentPendingIndex(0);
+    setCustomFileName('');
+    setCustomDate('');
   };
 
   const handleFilePress = (file: FileData) => {
@@ -630,6 +691,10 @@ export default function App() {
         return false;
       }
       if (dateFilter && file.date !== dateFilter) {
+        return false;
+      }
+      // Also apply the search-by-date filter from Find page
+      if (searchDateFilter && file.date !== searchDateFilter) {
         return false;
       }
       return true;
@@ -804,6 +869,405 @@ export default function App() {
     );
   }
 
+  // Upload Page
+  if (currentPage === 'upload') {
+    const uploadPageFiles = uploadedFiles.length > 0 ? uploadedFiles : (currentUser?.files || []);
+    
+    return (
+      <View style={styles.shell}>
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <View style={styles.header}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={styles.headerTitle}>📤 Upload Files</Text>
+                <Text style={styles.headerSubtitle}>Add new files to your storage</Text>
+              </View>
+              <Pressable onPress={handleLogout} style={styles.logoutBtn}>
+                <Text style={styles.logoutText}>Logout</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.userInfo}>Signed in as {firebaseUser?.email}</Text>
+          </View>
+
+          <View style={{ marginBottom: 30 }}>
+            <Pressable
+              onPress={() => setCurrentPage('dashboard')}
+              style={({ pressed }) => [
+                { padding: '12px 24px', backgroundColor: '#334155', borderRadius: 8, display: 'inline-block', marginBottom: 20 } as any,
+                pressed && { opacity: 0.8 }
+              ]}
+            >
+              <Text style={{ color: '#f1f5f9', fontWeight: '600', fontSize: 15 } as any}>← Back to Dashboard</Text>
+            </Pressable>
+          </View>
+
+          <View style={{ backgroundColor: '#1e293b', borderRadius: 12, padding: 40, borderWidth: 2, borderColor: '#334155', textAlign: 'center' as any, marginBottom: 30 }}>
+            <Text style={{ fontSize: 64, marginBottom: 20, display: 'block' } as any}>📤</Text>
+            <Text style={{ fontSize: 28, fontWeight: '700', color: '#f1f5f9', marginBottom: 12 } as any}>Upload Your Files</Text>
+            <Text style={{ fontSize: 16, color: '#94a3b8', marginBottom: 30, lineHeight: 1.5 } as any}>Choose files from your computer to upload and store securely in the cloud.</Text>
+            
+            {error && (
+              <Text style={{ color: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: 12, borderRadius: 8, marginBottom: 20, fontSize: 14, borderWidth: 1, borderColor: '#ef4444' } as any}>
+                ⚠️ {error}
+              </Text>
+            )}
+
+            <Pressable
+              onPress={() => {
+                setError('');
+                window.location.reload();
+              }}
+              style={({ pressed }) => [
+                { 
+                  background: 'rgba(94, 165, 46, 0.2)',
+                  border: '1px solid #5ea52e',
+                  padding: '10px 16px', 
+                  borderRadius: '8px',
+                  display: 'inline-block',
+                  cursor: 'pointer',
+                  marginBottom: '20px'
+                } as any,
+                pressed && { opacity: 0.8 }
+              ]}
+            >
+              <Text style={{ color: '#5ea52e', fontWeight: '600', fontSize: 14 } as any}>↻ Refresh Files</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => fileInputRef.current?.click()}
+              style={({ pressed }) => [
+                { 
+                  background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', 
+                  padding: '16px 48px', 
+                  borderRadius: '8px', 
+                  display: 'inline-block',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease'
+                } as any,
+                pressed && { transform: 'translateY(-2px)', boxShadow: '0 8px 20px rgba(59, 130, 246, 0.5)' }
+              ]}
+            >
+              <Text style={{ color: 'white', fontWeight: '700', fontSize: 16 } as any}>Choose File to Upload</Text>
+            </Pressable>
+
+            <Text style={{ color: '#64748b', marginTop: 20, fontSize: 14 } as any}>
+              You can select single or multiple files. They'll be automatically saved to the cloud.
+            </Text>
+          </View>
+
+          {uploadPageFiles.length > 0 && (
+            <View>
+              <Text style={{ fontSize: 20, fontWeight: '700', color: '#f1f5f9', marginBottom: 20 } as any}>
+                📁 Uploaded Files ({uploadPageFiles.length})
+              </Text>
+              <View style={styles.grid}>
+                {uploadPageFiles.map(file => (
+                  <Pressable
+                    key={file.id}
+                    onPress={() => handleFilePress(file)}
+                    style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+                  >
+                    <Pressable
+                      onPress={(e) => handleDeleteClick(file.id, file.name, e)}
+                      style={styles.deleteButton}
+                    >
+                      <Text style={styles.deleteButtonText}>×</Text>
+                    </Pressable>
+                    <Text style={styles.icon}>{getIcon(file.name, file.type)}</Text>
+                    <Text style={styles.name}>{file.name}</Text>
+                    <View style={styles.infoSection}>
+                      {file.type === 'file' ? (
+                        <Text style={styles.infoText}>Size: {formatSize(file.size)}</Text>
+                      ) : (
+                        <Text style={styles.infoText}>Folder</Text>
+                      )}
+                      <Text style={styles.infoText}>Date: {file.date}</Text>
+                      {file.grNo ? <Text style={styles.infoText}>GR: {file.grNo}</Text> : null}
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {uploadPageFiles.length === 0 && (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyText}>No files uploaded yet</Text>
+              <Text style={{ color: '#94a3b8', marginTop: 10, fontSize: 14 } as any}>
+                Click "Choose File to Upload" above to upload your first file
+              </Text>
+            </View>
+          )}
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={handleFileSelect}
+            style={{ display: 'none' }}
+            accept="*"
+          />
+        </ScrollView>
+
+        {/* Upload Rename & Date Modal */}
+        {showUploadModal && pendingFiles.length > 0 && (
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { maxWidth: 520 }]}>
+              <Pressable onPress={handleCancelUpload} style={styles.modalClose}>
+                <Text style={styles.modalCloseText}>×</Text>
+              </Pressable>
+              <Text style={styles.modalTitle}>
+                📤 Upload File {pendingFiles.length > 1 ? `(${currentPendingIndex + 1} of ${pendingFiles.length})` : ''}
+              </Text>
+
+              <View style={{ marginBottom: 20, marginTop: 8 }}>
+                <Text style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Original file:</Text>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#f1f5f9', backgroundColor: '#0f172a', padding: 10, borderRadius: 6, borderWidth: 1, borderColor: '#334155' }}>
+                  {pendingFiles[currentPendingIndex]?.name}
+                </Text>
+              </View>
+
+              <View style={{ marginBottom: 18 }}>
+                <Text style={{ fontSize: 13, fontWeight: '600', color: '#cbd5e1', marginBottom: 8, textTransform: 'uppercase' as any, letterSpacing: 0.5 }}>
+                  Rename File
+                </Text>
+                <input
+                  type="text"
+                  value={customFileName}
+                  onChange={(e: any) => setCustomFileName(e.currentTarget.value)}
+                  placeholder="Enter file name"
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    border: '2px solid #475569',
+                    borderRadius: '8px',
+                    fontSize: '15px',
+                    fontFamily: 'inherit',
+                    color: '#f1f5f9',
+                    backgroundColor: '#0f172a',
+                    boxSizing: 'border-box' as any,
+                    outline: 'none',
+                    transition: 'border-color 0.2s'
+                  }}
+                  onFocus={(e: any) => { e.currentTarget.style.borderColor = '#3b82f6'; }}
+                  onBlur={(e: any) => { e.currentTarget.style.borderColor = '#475569'; }}
+                />
+                <Text style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+                  Extension ({pendingFiles[currentPendingIndex]?.name.includes('.') ? '.' + pendingFiles[currentPendingIndex]?.name.split('.').pop() : ''}) will be added automatically
+                </Text>
+              </View>
+
+              <View style={{ marginBottom: 24 }}>
+                <Text style={{ fontSize: 13, fontWeight: '600', color: '#cbd5e1', marginBottom: 8, textTransform: 'uppercase' as any, letterSpacing: 0.5 }}>
+                  Select Date
+                </Text>
+                <input
+                  type="date"
+                  value={customDate}
+                  onChange={(e: any) => setCustomDate(e.currentTarget.value)}
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    border: '2px solid #475569',
+                    borderRadius: '8px',
+                    fontSize: '15px',
+                    fontFamily: 'inherit',
+                    color: '#f1f5f9',
+                    backgroundColor: '#0f172a',
+                    boxSizing: 'border-box' as any,
+                    outline: 'none',
+                    transition: 'border-color 0.2s',
+                    colorScheme: 'dark' as any
+                  }}
+                  onFocus={(e: any) => { e.currentTarget.style.borderColor = '#3b82f6'; }}
+                  onBlur={(e: any) => { e.currentTarget.style.borderColor = '#475569'; }}
+                />
+              </View>
+
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12, width: '100%' }}>
+                <Pressable
+                  onPress={handleCancelUpload}
+                  style={({ pressed }) => [
+                    { backgroundColor: '#334155', borderRadius: 8, paddingVertical: 11, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center' },
+                    pressed && { opacity: 0.8 }
+                  ]}
+                >
+                  <Text style={{ color: '#f1f5f9', fontWeight: '600', fontSize: 14 }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleConfirmUpload}
+                  disabled={uploadingFile}
+                  style={({ pressed }) => [
+                    { backgroundColor: uploadingFile ? '#1d4ed8' : '#3b82f6', borderRadius: 8, paddingVertical: 11, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center', opacity: uploadingFile ? 0.7 : 1 },
+                    pressed && !uploadingFile && { opacity: 0.8 }
+                  ]}
+                >
+                  <Text style={{ color: '#fff', fontWeight: '600', fontSize: 14 }}>
+                    {uploadingFile ? 'Uploading...' : 'Upload'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  // Find Page
+  if (currentPage === 'find') {
+    return (
+      <View style={styles.shell}>
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <View style={styles.header}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={styles.headerTitle}>🔍 Find Files</Text>
+                <Text style={styles.headerSubtitle}>Search and browse your files</Text>
+              </View>
+              <Pressable onPress={handleLogout} style={styles.logoutBtn}>
+                <Text style={styles.logoutText}>Logout</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.userInfo}>Signed in as {firebaseUser?.email}</Text>
+          </View>
+
+          <View style={{ marginBottom: 30 }}>
+            <Pressable
+              onPress={() => setCurrentPage('dashboard')}
+              style={({ pressed }) => [
+                { padding: '12px 24px', backgroundColor: '#334155', borderRadius: 8, display: 'inline-block', marginBottom: 20 } as any,
+                pressed && { opacity: 0.8 }
+              ]}
+            >
+              <Text style={{ color: '#f1f5f9', fontWeight: '600', fontSize: 15 } as any}>← Back to Dashboard</Text>
+            </Pressable>
+          </View>
+
+          <input
+            style={{
+              width: '100%',
+              paddingTop: '16px',
+              paddingBottom: '16px',
+              paddingLeft: '20px',
+              paddingRight: '20px',
+              border: '2px solid #475569',
+              borderRadius: '10px',
+              fontSize: '16px',
+              fontFamily: 'inherit',
+              transition: 'all 0.3s ease',
+              color: '#f1f5f9',
+              backgroundColor: '#0f172a',
+              boxSizing: 'border-box' as any,
+              marginBottom: '12px'
+            }}
+            type="text"
+            placeholder="Search files by name or GR number..."
+            value={query}
+            onChange={(e) => setQuery(e.currentTarget.value)}
+            onFocus={(e) => {
+              e.currentTarget.style.borderColor = '#3b82f6';
+              e.currentTarget.style.boxShadow = '0 0 0 3px rgba(59, 130, 246, 0.15)';
+            }}
+            onBlur={(e) => {
+              e.currentTarget.style.borderColor = '#475569';
+              e.currentTarget.style.boxShadow = 'none';
+            }}
+          />
+
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: '30px', gap: 12 } as any}>
+            <Text style={{ fontSize: 14, fontWeight: '600', color: '#cbd5e1', whiteSpace: 'nowrap' } as any}>Filter by Date:</Text>
+            <input
+              type="date"
+              value={searchDateFilter}
+              onChange={(e: any) => setSearchDateFilter(e.currentTarget.value)}
+              style={{
+                flex: 1,
+                padding: '12px 16px',
+                border: '2px solid #475569',
+                borderRadius: '10px',
+                fontSize: '15px',
+                fontFamily: 'inherit',
+                color: '#f1f5f9',
+                backgroundColor: '#0f172a',
+                boxSizing: 'border-box' as any,
+                outline: 'none',
+                transition: 'all 0.3s ease',
+                colorScheme: 'dark' as any
+              }}
+              onFocus={(e: any) => {
+                e.currentTarget.style.borderColor = '#3b82f6';
+                e.currentTarget.style.boxShadow = '0 0 0 3px rgba(59, 130, 246, 0.15)';
+              }}
+              onBlur={(e: any) => {
+                e.currentTarget.style.borderColor = '#475569';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            />
+            {searchDateFilter && (
+              <Pressable
+                onPress={() => setSearchDateFilter('')}
+                style={({ pressed }) => [
+                  { backgroundColor: '#475569', borderRadius: 8, paddingVertical: 10, paddingHorizontal: 16 },
+                  pressed && { opacity: 0.8 }
+                ]}
+              >
+                <Text style={{ color: '#f1f5f9', fontWeight: '600', fontSize: 13 }}>Clear</Text>
+              </Pressable>
+            )}
+          </View>
+
+          {(query.trim() || searchDateFilter) ? (
+            <>
+              {allFiles.length > 0 && (
+                <Text style={styles.summaryText}>
+                  Showing {filtered.length} of {allFiles.length} files
+                </Text>
+              )}
+              {filtered.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <Text style={styles.emptyText}>No files matched your search.</Text>
+                </View>
+              ) : (
+                <View style={styles.grid}>
+                  {filtered.map(file => (
+                    <Pressable
+                      key={file.id}
+                      onPress={() => handleFilePress(file)}
+                      style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+                    >
+                      <Pressable
+                        onPress={(e) => handleDeleteClick(file.id, file.name, e)}
+                        style={styles.deleteButton}
+                      >
+                        <Text style={styles.deleteButtonText}>×</Text>
+                      </Pressable>
+                      <Text style={styles.icon}>{getIcon(file.name, file.type)}</Text>
+                      <Text style={styles.name}>{file.name}</Text>
+                      <View style={styles.infoSection}>
+                        {file.type === 'file' ? (
+                          <Text style={styles.infoText}>Size: {formatSize(file.size)}</Text>
+                        ) : (
+                          <Text style={styles.infoText}>Folder</Text>
+                        )}
+                        <Text style={styles.infoText}>Date: {file.date}</Text>
+                        {file.grNo ? <Text style={styles.infoText}>GR: {file.grNo}</Text> : null}
+                      </View>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+            </>
+          ) : (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyText}>Type to search or select a date to filter your files</Text>
+            </View>
+          )}
+        </ScrollView>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.shell}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -820,125 +1284,53 @@ export default function App() {
           <Text style={styles.userInfo}>Signed in as {firebaseUser?.email}</Text>
         </View>
 
-        <View style={styles.searchRow}>
-          <input
-            style={{
-              width: '100%',
-              paddingTop: '12px',
-              paddingBottom: '12px',
-              paddingLeft: '16px',
-              paddingRight: '16px',
-              borderRadius: '10px',
-              border: '1px solid #475569',
-              backgroundColor: '#1e293b',
-              fontSize: '15px',
-              color: '#f1f5f9',
-              boxSizing: 'border-box' as any
-            }}
-            type="text"
-            placeholder="Search by file name or GR number"
-            value={query}
-            onChange={(e) => setQuery(e.currentTarget.value)}
-          />
-        </View>
-
-        <View style={styles.controls}>
-          <Pressable
-            onPress={() => fileInputRef.current?.click()}
-            style={({ pressed }) => [styles.uploadButton, pressed && styles.buttonPressed]}
-          >
-            <Text style={styles.uploadButtonText}>📤 Upload File</Text>
+        <View style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '25px', marginBottom: '40px' } as any}>
+          <Pressable 
+            onPress={() => setCurrentPage('upload')}
+            style={({ pressed }) => [{ backgroundColor: '#1e293b', borderRadius: '12px', padding: '40px', boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)', border: '2px solid transparent', transition: 'all 0.3s ease', textAlign: 'center' as any, cursor: 'pointer' } as any, pressed && { boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)', transform: 'translateY(-4px)' }]}>
+            <Text style={{ fontSize: 56, marginBottom: 16, display: 'block' } as any}>📤</Text>
+            <Text style={{ fontSize: 22, marginBottom: 8, color: '#f1f5f9', fontWeight: '700', margin: '0 0 8px 0' } as any}>Upload File</Text>
+            <Text style={{ color: '#94a3b8', marginBottom: 24, margin: '0 0 24px 0', fontSize: 14 } as any}>Add new files to your storage</Text>
+            <View
+              style={{ 
+                background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', 
+                color: 'white', 
+                border: 'none', 
+                padding: '12px 32px', 
+                borderRadius: '8px', 
+                fontSize: 15, 
+                fontWeight: '600', 
+                cursor: 'pointer', 
+                transition: 'all 0.3s ease' 
+              } as any}
+            >
+              <Text style={{ color: 'white', fontWeight: '600', fontSize: 15 } as any}>Choose File</Text>
+            </View>
           </Pressable>
 
-          <View style={styles.sortRow}>
-            <Text style={styles.sortLabel}>Sort:</Text>
-            {SORT_OPTIONS.map(option => (
-              <Pressable
-                key={option.value}
-                onPress={() => setSort(option.value)}
-                style={({ pressed }) => [
-                  styles.sortChip,
-                  sort === option.value && styles.sortChipActive,
-                  pressed && styles.buttonPressed
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.sortChipText,
-                    sort === option.value && styles.sortChipTextActive
-                  ]}
-                >
-                  {option.label}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <input
-            type="date"
-            value={dateFilter}
-            onChange={(e) => setDateFilter(e.currentTarget.value)}
-            style={{
-              padding: '8px 12px',
-              borderRadius: '8px',
-              border: '1px solid #475569',
-              backgroundColor: '#1e293b',
-              color: '#cbd5e1',
-              fontSize: '13px',
-              fontWeight: 600,
-              cursor: 'pointer',
-              outline: 'none',
-              marginBottom: '12px'
-            } as any}
-          />
-
-          <Text style={styles.summaryText}>
-            Showing {filtered.length} of {allFiles.length} files
-          </Text>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            onChange={handleFileSelect}
-            style={{ display: 'none' }}
-            accept="*"
-          />
+          <Pressable 
+            onPress={() => setCurrentPage('find')}
+            style={({ pressed }) => [{ backgroundColor: '#1e293b', borderRadius: '12px', padding: '40px', boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)', border: '2px solid transparent', transition: 'all 0.3s ease' } as any, pressed && { boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)', transform: 'translateY(-4px)' }]}>
+            <Text style={{ fontSize: 56, marginBottom: 16, display: 'block' } as any}>🔍</Text>
+            <Text style={{ fontSize: 22, marginBottom: 8, color: '#f1f5f9', fontWeight: '700', margin: '0 0 8px 0' } as any}>Find Files</Text>
+            <Text style={{ color: '#94a3b8', marginBottom: 24, margin: '0 0 24px 0', fontSize: 14 } as any}>Search by name or GR number</Text>
+            <View
+              style={{ 
+                background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', 
+                color: 'white', 
+                border: 'none', 
+                padding: '12px 32px', 
+                borderRadius: '8px', 
+                fontSize: 15, 
+                fontWeight: '600', 
+                cursor: 'pointer', 
+                transition: 'all 0.3s ease' 
+              } as any}
+            >
+              <Text style={{ color: 'white', fontWeight: '600', fontSize: 15 } as any}>Search Files</Text>
+            </View>
+          </Pressable>
         </View>
-
-        {filtered.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>No files matched your filters.</Text>
-          </View>
-        ) : (
-          <View style={styles.grid}>
-            {filtered.map(file => (
-              <Pressable
-                key={file.id}
-                onPress={() => handleFilePress(file)}
-                style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
-              >
-                <Pressable
-                  onPress={(e) => handleDeleteClick(file.id, file.name, e)}
-                  style={styles.deleteButton}
-                >
-                  <Text style={styles.deleteButtonText}>×</Text>
-                </Pressable>
-                <Text style={styles.icon}>{getIcon(file.name, file.type)}</Text>
-                <Text style={styles.name}>{file.name}</Text>
-                <View style={styles.infoSection}>
-                  {file.type === 'file' ? (
-                    <Text style={styles.infoText}>Size: {formatSize(file.size)}</Text>
-                  ) : (
-                    <Text style={styles.infoText}>Folder</Text>
-                  )}
-                  <Text style={styles.infoText}>Date: {file.date}</Text>
-                  {file.grNo ? <Text style={styles.infoText}>GR: {file.grNo}</Text> : null}
-                </View>
-              </Pressable>
-            ))}
-          </View>
-        )}
       </ScrollView>
 
       {deleteConfirmation && (

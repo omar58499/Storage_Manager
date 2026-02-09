@@ -716,56 +716,58 @@ function FileExplorer() {
     <div className="container">
       <div className="header">
         <h1>📂 File Browser</h1>
-        <p>Browse and manage your files easily</p>
+        <p>Securely manage and preview your files</p>
       </div>
 
-      <div className="search-box">
-        <input
-          type="text"
-          placeholder="Search files by name or GR number..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-      </div>
+      <div className="dashboard-grid">
+        <div className="dashboard-box upload-box">
+          <div className="box-icon">📤</div>
+          <h3>Upload File</h3>
+          <p>Add new files to your storage</p>
+          <button className="box-button">
+            Choose File
+          </button>
+        </div>
 
-      <div className="filter-controls">
-        <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          Sort by:
-          <select 
-            className="sort-select"
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as 'name' | 'date' | 'size')}
-          >
-            <option value="date">Latest First</option>
-            <option value="name">Name (A-Z)</option>
-            <option value="size">Size (Largest)</option>
-          </select>
-        </label>
-        <span style={{ color: '#666', fontSize: '14px' }}>
-          Showing {filteredFiles.length} of {files.length} files
-        </span>
+        <div className="dashboard-box finder-box">
+          <div className="box-icon">🔍</div>
+          <h3>Find Files</h3>
+          <p>Search by name or GR number</p>
+          <input
+            type="text"
+            className="finder-input"
+            placeholder="Search files..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}s
+          />
+        </div>
       </div>
 
       {filteredFiles.length === 0 ? (
         <div className="empty-state">
           <p style={{ fontSize: '18px', marginBottom: '10px' }}>No files found</p>
-          <p>Try adjusting your search or filters</p>
+          <p>Use the finder box above to search for files</p>
         </div>
       ) : (
-        <div className="file-grid">
-          {filteredFiles.map(file => (
-            <div key={file.id} className="file-card" onClick={() => handleFileClick(file)}>
-              <div className="file-icon">{getFileIcon(file.name, file.type)}</div>
-              <div className="file-name">{file.name}</div>
-              <div className="file-info">
-                {file.type === 'file' && <div>Size: {formatFileSize(file.size)}</div>}
-                {file.type === 'folder' && <div>Folder</div>}
-                <div style={{ marginTop: '8px', color: '#999' }}>{file.date}</div>
-                {file.grNo && <div style={{ marginTop: '8px', color: '#667eea', fontWeight: '600' }}>GR: {file.grNo}</div>}
+        <>
+          <div style={{ marginBottom: '20px', color: '#666', fontSize: '14px' }}>
+            Showing {filteredFiles.length} of {files.length} files
+          </div>
+          <div className="file-grid">
+            {filteredFiles.map(file => (
+              <div key={file.id} className="file-card" onClick={() => handleFileClick(file)}>
+                <div className="file-icon">{getFileIcon(file.name, file.type)}</div>
+                <div className="file-name">{file.name}</div>
+                <div className="file-info">
+                  {file.type === 'file' && <div>Size: {formatFileSize(file.size)}</div>}
+                  {file.type === 'folder' && <div>Folder</div>}
+                  <div style={{ marginTop: '8px', color: '#999' }}>{file.date}</div>
+                  {file.grNo && <div style={{ marginTop: '8px', color: '#667eea', fontWeight: '600' }}>GR: {file.grNo}</div>}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
